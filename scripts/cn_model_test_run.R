@@ -1,10 +1,7 @@
-# Load Libraries
-#----------------------------------------------------------------
-
+# Load Libraries ---------------
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-library(patchwork)
 library(cowplot)
 library(visdat)
 library(here)
@@ -16,19 +13,19 @@ library(purrr)
 # if (!require(remotes)) {
 #   install.packages("remotes")
 # }
-# remotes::install_github("stineb/rsofun", ref = "cnmodel")
+detach("package:rsofun", unload = TRUE)
+remotes::install_github("stineb/rsofun", ref = "cnmodel")
 library(rsofun)
 
-#----------------------------------------------------------------
+
 # Load Data------------
-#----------------------------------------------------------------
 
 # FLUXNET
-ch0e2_drivers <- readRDS(here("data", "ch0e2_drivers.rds"))
+drivers <- readRDS(here("data", "drivers_ch_oe2.rds"))
 
-#----------------------------------------------------------------
-# N deposition----------
-#----------------------------------------------------------------
+# Prepare driver object --------------
+## N deposition----------
+
 
 # Reactive N input needs to be in gN per day
 # added to forcing time series: specify quantity of N added on which day
@@ -47,11 +44,11 @@ n_input_test <- function(data) {
   return(data)
 }
 
-ch0e2_drivers <- n_input_test(ch0e2_drivers)
+drivers <- n_input_test(drivers)
 
-#----------------------------------------------------------------
-# Harvesting------------
-#----------------------------------------------------------------
+
+## Harvesting------------
+
 
 # The fraction of biomass harvested per day needs to be specified in the forcing time series
 # cseed and nseed new seeds added after harvesting
@@ -74,11 +71,11 @@ fharv_seed <- function(data, use_cseed = 5, cn_seed = 20) {
   return(data)
 }
 
-ch0e2_drivers <- fharv_seed(ch0e2_drivers)
+drivers <- fharv_seed(drivers)
 
-#----------------------------------------------------------------
-# Simulation parameters------------
-#----------------------------------------------------------------
+
+## Simulation parameters------------
+
 # The spinup of cn_model must be long enough to equilibrate fluxes
 
 # Function to modify specific columns in each dataframe
@@ -95,11 +92,10 @@ modify_params <- function(df_list, spinupyears_val, recycle_val) {
 }
 
 # FLUXNET
-ch0e2_drivers$params_siml <- modify_params(ch0e2_drivers$params_siml, 2021, 2)
+drivers$params_siml <- modify_params(drivers$params_siml, 2021, 2)
 
-#----------------------------------------------------------------
-# Define model parameter values------------
-#----------------------------------------------------------------
+
+## Model parameters -------------
 
 pars <- list(
   # P-model
@@ -212,124 +208,162 @@ pars <- list(
   nuptake_vmax = 0.2
 )
 
-#----------------------------------------------------------------
-# Run the model ------------
-# for these parameters using ch-oe1
-#----------------------------------------------------------------
+# Run the model
+# # for these parameters using ch-oe1
+#
+# # Create output directories
+#
+# # Define the full path
+# full_path <- "/Users/PhillipZywczuk/Documents/2023_2024_postdoc_eth/data/renku/n2o_ssa_lit_review/lit_review_modelling/p_model/data"
+#
+# # Create the full path and all necessary parent directories
+# dir.create(full_path, recursive = TRUE, showWarnings = FALSE)
+#
+# # Create 'out' directory inside the specified full path
+# out_dir <- file.path(full_path, "out")
+# dir.create(out_dir, showWarnings = FALSE)
+#
+# # Create 'vignettes' directory inside the specified full path
+# vignettes_dir <- file.path(full_path, "vignettes")
+# dir.create(vignettes_dir, showWarnings = FALSE)
+#
+# # Create 'out' directory inside the 'vignettes' directory
+# vignettes_out_dir <- file.path(vignettes_dir, "out")
+# dir.create(vignettes_out_dir, showWarnings = FALSE)
 
-# Create output directories
-
-# Define the full path
-full_path <- "/Users/PhillipZywczuk/Documents/2023_2024_postdoc_eth/data/renku/n2o_ssa_lit_review/lit_review_modelling/p_model/data"
-
-# Create the full path and all necessary parent directories
-dir.create(full_path, recursive = TRUE, showWarnings = FALSE)
-
-# Create 'out' directory inside the specified full path
-out_dir <- file.path(full_path, "out")
-dir.create(out_dir, showWarnings = FALSE)
-
-# Create 'vignettes' directory inside the specified full path
-vignettes_dir <- file.path(full_path, "vignettes")
-dir.create(vignettes_dir, showWarnings = FALSE)
-
-# Create 'out' directory inside the 'vignettes' directory
-vignettes_out_dir <- file.path(vignettes_dir, "out")
-dir.create(vignettes_out_dir, showWarnings = FALSE)
-
-# C-only run
+# C-only run------------------------
 # Define whether to use interactive C-N cycling
+drivers$params_siml[[1]]$c_only <- TRUE
 
-# Function to add a new column 'c_only' with value TRUE to each dataframe
-add_c_only_column <- function(df_list) {
-  # Map over each dataframe in the list
-  df_list <- map(df_list, ~ {
-    # Add 'c_only' column with value TRUE
-    mutate(.x, c_only = TRUE)
-  })
+# Run the model
+output <- runread_cnmodel_f(drivers, par = pars)
 
-  return(df_list)
-}
 
-# FLUXNET
-ch0e2_drivers$params_siml <- add_c_only_column(ch0e2_drivers$params_siml)
+## Aggregate outputs -----------
+# Extract data and aggregate by mean
+df_out <- output$data[[1]] %>%
+  as_tibble()
 
-#----------------------------------------------------------------
-# Run CN model (FLUXNET DATA) ------------
-#----------------------------------------------------------------
+# overall mean
+# XXX: may aggregate to growing-season only
+df_mean <- df_out |>
+  summarise(across(where(is.numeric), \(x) mean(x, na.rm = TRUE)))
 
-cnmodel_run_plot <- function(drivers, pars, df_name) {
-  # Run the model
-  output <- runread_cnmodel_f(drivers, par = pars)
+# mean seasonal cycle
+doydf_rsofun <- df_out |>
+  as_tibble() |>
+  mutate(doy = lubridate::yday(date)) |>
+  group_by(doy) |>
+  summarise(gpp = mean(gpp), fapar = mean(fapar))
 
-  # Extract data
-  model_data <- output$data[[1]] %>% as_tibble()
+# Benchmark --------------------
+## Leaf traits -------------------
 
-  #### LAI -----------------------------
-  gg1 <- model_data %>%
-    ggplot(aes(date, lai)) +
-    geom_line() +
-    labs(x = "", y = expression(paste("LAI (m"^2, " m"^-2, ")"))) +
-    theme_classic()
+# obtain file from https://doi.org/10.5281/zenodo.6831903
+df_traits <- read_csv("~/data/leafn_vcmax_ning_dong/data_leafn_vcmax_ning_dong.csv") %>%
+  rename(lat = Latitude, lon = longitude)
 
-  # XXX compare this to LAI in FluxDataKit daily CSV files
+# Compare to data for non-woody species given that CH-Oe2 is a grassland
+df_traits <- df_traits |>
+  filter(woody == "non-woody") |>
+  rename(lma = LMA, narea = Narea, nmass = Nmass, vcmax = vcmax_obs)
 
-  #### fAPAR -----------------------------
-  gg1 <- model_data %>%
-    mutate(fapar = 1 - exp(-pars$kbeer * lai)) |>
-    ggplot(aes(date, fapar)) +
-    geom_line() +
-    labs(x = "", y = expression(paste("fAPAR (unitless)"))) +
-    theme_classic()
+# LMA (rsofun output is in gC m-2-leaf, Ning's data is in "mass" = DM?)
+gg_traits_1 <- ggplot() +
+  geom_density(aes(lma/2, ..density..), data = df_traits, fill = "#777055ff", color = NA, alpha = 0.5) +
+  theme_classic() +
+  geom_vline(aes(xintercept = lma), data = df_mean, color = "#29a274ff") +
+  labs(x = "LMA") +
+  coord_cartesian(clip = 'off') +
+  scale_y_continuous(expand = c(0, 0))
 
-  # XXX compare this to FPAR in FluxDataKit rsofun drivers or daily CSV files
+gg_traits_2 <- ggplot() +
+  geom_density(aes(nmass, ..density..), data = df_traits, fill = "#777055ff", color = NA, alpha = 0.5) +
+  theme_classic() +
+  geom_vline(aes(xintercept = narea/lma), data = df_mean, color = "#29a274ff") +
+  labs(x = expression(italic("N")[mass])) +
+  coord_cartesian(clip = 'off') +
+  scale_y_continuous(expand = c(0, 0))
 
-  #### GPP -----------------------------
-  gg2 <- model_data %>%
-    ggplot(aes(date, gpp)) +
-    geom_line() +
-    labs(x = "", y = expression(paste("GPP (gC m"^-2, " d"^-1, ")"))) +
-    theme_classic()
+gg_traits_3 <- ggplot() +
+  geom_density(aes(narea, ..density..), data = df_traits, fill = "#777055ff", color = NA, alpha = 0.5) +
+  geom_vline(aes(xintercept = narea), data = df_mean, color = "#29a274ff") +
+  theme_classic() +
+  labs(x = expression(italic("N")[area])) +
+  coord_cartesian(clip = 'off') +
+  scale_y_continuous(expand = c(0, 0))
 
-  # XXX compare this to GPP in FluxDataKit rsofun drivers or daily CSV files
+## Vcmax in micro-mol m-2 s-1
+gg_traits_4 <- ggplot() +
+  geom_density(aes(vcmax, ..density..), data = df_traits, fill = "#777055ff", color = NA, alpha = 0.5) +
+  theme_classic() +
+  geom_vline(aes(xintercept =  1e6 * vcmax), data = df_mean, color = "#29a274ff") +
+  labs(x = expression(italic("V")[cmax])) +
+  coord_cartesian(clip = 'off') +
+  scale_y_continuous(expand = c(0, 0))
 
-  #### NEP -----------------------------
-  gg3 <- model_data %>%
-    ggplot(aes(date, gpp - rleaf - rwood - rroot - rhet)) +
-    geom_line() +
-    labs(x = "", y = expression(paste("NEP (gC m"^-2, " d"^-1, ")"))) +
-    theme_classic()
 
-  # XXX compare this to NEE in FluxDataKit rsofun drivers or daily CSV files
+# XXX simulated LMA is high in comparison to the mean across all observations in the Dong et al. dataset.
+# May change suitable parameter. Or is it consistent with observations from the site?
 
-  #### cumulative NEP -----------------------------
-  gg4 <- model_data %>%
-    ggplot(aes(date, cumsum(gpp - rleaf - rwood - rroot - rhet - rgrow))) +
-    geom_line() +
-    labs(x = "", y = expression(paste("Cum. NEP (gC m"^-2, ")"))) +
-    theme_classic()
+## fAPAR mean seasonal cycle -----------
+doydf_modis <- drivers |>
+  unnest(forcing) |>
+  mutate(doy = lubridate::yday(date)) |>
+  group_by(doy) |>
+  summarise(fapar = mean(fapar, na.rm = TRUE))
 
-  # Combine plots
-  combined_plot <- plot_grid(
-    gg1,
-    gg2,
-    gg3,
-    gg4,
-    ncol = 1
+gg_fapar_msc <- ggplot() +
+  geom_line(data = doydf_modis,  aes(doy, fapar), color = "#777055ff") +
+  geom_line(data = doydf_rsofun, aes(doy, fapar), color = "#29a274ff") +
+  theme_classic()
+
+# XXX: too high fAPAR (and therefore LAI), adjust parameters
+
+## GPP mean seasonal cycle ---------------
+doydf_fluxnet <- drivers |>
+  unnest(forcing) |>
+  mutate(doy = lubridate::yday(date)) |>
+  group_by(doy) |>
+  summarise(gpp = mean(gpp))
+
+gg_gpp_msc <- ggplot() +
+  geom_line(data = doydf_fluxnet, aes(doy, gpp), color = "#777055ff") +
+  geom_line(data = doydf_rsofun, aes(doy, gpp), color = "#29a274ff") +
+  theme_classic()
+
+# XXX mean seasonal cycle of observed GPP looks like there is harvesting in early summer
+
+## NEE mean seasonal cycle ---------------
+
+# xxx to be included in rsofun drivers
+
+## Combine plots -----------
+panel_traits <- plot_grid(
+  gg_traits_1,
+  gg_traits_2,
+  gg_traits_3,
+  gg_traits_4,
+  ncol = 1
+)
+
+plot_grid(
+  panel_traits,
+  gg_fapar_msc,
+  gg_gpp_msc,
+  ncol = 1,
+  rel_heights = c(1,0.7,0.7)
+)
+
+ggsave(
+  here("output/benchmarking_c-only.pdf"),
+  width = 5,
+  height = 12
   )
 
-  # Construct the filename using the dataframe name
-  filename <- paste0(df_name, ".png")
-
-  # Save the plot in the 'output' folder of the repository
-  ggsave(filename = here( "output", filename), plot = combined_plot, height = 12, width = 8, dpi = 300)
-  message("Plot saved successfully: ", here( "output", filename))
-
-  # Display the plot
-  print(combined_plot)
-}
-
-# Call the function with the updated parameters
-cnmodel_run_plot(ch0e2_drivers, pars, "CH-0E2_NTRUE")
+# Further workflow ---------------
+# - Adjust relevant parameters to achieve good C-only model benchmarking
+# - Adjust relevant parameters to reduce N fixation to minimum with un-closed N balance (given that we don't have much N fixation at this site.)
+# - Adjust relevant parameters to achieve good C-only model benchmarking with closed N balance
 
 
